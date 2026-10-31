@@ -1,39 +1,37 @@
 /*
- * TS12A44513 Ron / Roff test  --  MSP432P401R LaunchPad (CCS)
+ * TS12A44513 test -- MSP432P401R (CCS) -- ONE code for channel 1 and channel 2
+ * Both ICs (IC7 and IC8) are driven together with the same logic.
  *
- * Wiring:
- *   P2.3 -> IN1  (pin 13)   controls switch 1 : NO1 (pin 1) <-> COM1 (pin 2)
- *   P2.4 -> IN2  (pin 5)    controls switch 2 : NC2 (pin 3) <-> COM2 (pin 4)
- *   GND  -> GND  (pin 7)    VCC -> VCC (pin 14)
+ *   Channel 1 = NO1 / COM1, controlled by IN1 -> measure Roff
+ *   Channel 2 = NC2 / COM2, controlled by IN2 -> measure Ron
  *
- * Truth table (from datasheet):
- *   IN = L : NO-COM OFF , NC-COM ON
- *   IN = H : NO-COM ON  , NC-COM OFF
+ *   Type 1 : IN1 = LOW  (NO1 OFF)  -> MEASURE Roff on channel 1   (IN2 = HIGH)
+ *   Type 2 : IN2 = LOW  (NC2 ON)   -> MEASURE Ron  on channel 2   (IN1 = HIGH)
+ *   Type 0 : IN1 = IN2 = HIGH (idle, no test)
+ *   Type ? : menu
  *
- * Terminal: 9600 8-N-1 (XDS110 backchannel, P1.2 RX / P1.3 TX), SMCLK = 3 MHz
- * Type one character and press Enter/Send:
- *   1 -> NO1 : measure Ron   (IN1 = H)
- *   2 -> NO1 : measure Roff  (IN1 = L)
- *   3 -> NC2 : measure Ron   (IN2 = L)
- *   4 -> NC2 : measure Roff  (IN2 = H)
- *   ? or h -> show menu
+ * Pins (edit defines if wiring differs):
+ *   IC7 : P2.3 -> IN1, P2.4 -> IN2
+ *   IC8 : P5.0 -> IN1, P5.1 -> IN2
+ * Terminal: 9600 8-N-1 (backchannel UART), SMCLK = 3 MHz
  */
 
 #include "msp.h"
 
-#define IN1_PIN  BIT3      /* P2.3 */
-#define IN2_PIN  BIT4      /* P2.4 */
+#define IC7_IN1  BIT3   /* P2.3 */
+#define IC7_IN2  BIT4   /* P2.4 */
+#define IC8_IN1  BIT0   /* P5.0 */
+#define IC8_IN2  BIT1   /* P5.1 */
 
 static void uart_init(void)
 {
     EUSCI_A0->CTLW0 |= EUSCI_A_CTLW0_SWRST;
     EUSCI_A0->CTLW0  = EUSCI_A_CTLW0_SWRST | EUSCI_A_CTLW0_SSEL__SMCLK;
-    /* 3 MHz / 9600 : BRW=19, BRF=8, BRS=0xAA, oversampling on */
-    EUSCI_A0->BRW    = 19;
+    EUSCI_A0->BRW    = 19;                       /* 3 MHz / 9600 */
     EUSCI_A0->MCTLW  = (0xAA << EUSCI_A_MCTLW_BRS_OFS) |
                        (8    << EUSCI_A_MCTLW_BRF_OFS) |
                        EUSCI_A_MCTLW_OS16;
-    P1->SEL0 |= BIT2 | BIT3;                 /* P1.2 RXD, P1.3 TXD */
+    P1->SEL0 |= BIT2 | BIT3;
     P1->SEL1 &= ~(BIT2 | BIT3);
     EUSCI_A0->CTLW0 &= ~EUSCI_A_CTLW0_SWRST;
 }
@@ -58,27 +56,44 @@ static char uart_getc(void)
     return (char)EUSCI_A0->RXBUF;
 }
 
+/* level: 1 = HIGH, 0 = LOW ; applies to IC7 and IC8 together */
+static void set_in1(int level)
+{
+    if (level) { P2->OUT |= IC7_IN1; P5->OUT |= IC8_IN1; }
+    else       { P2->OUT &= ~IC7_IN1; P5->OUT &= ~IC8_IN1; }
+}
+
+static void set_in2(int level)
+{
+    if (level) { P2->OUT |= IC7_IN2; P5->OUT |= IC8_IN2; }
+    else       { P2->OUT &= ~IC7_IN2; P5->OUT &= ~IC8_IN2; }
+}
+
 static void menu(void)
 {
-    uart_puts("\n==== TS12A44513 Ron/Roff test ====\n");
-    uart_puts(" 1 : NO1 -> measure Ron   (IN1=H)\n");
-    uart_puts(" 2 : NO1 -> measure Roff  (IN1=L)\n");
-    uart_puts(" 3 : NC2 -> measure Ron   (IN2=L)\n");
-    uart_puts(" 4 : NC2 -> measure Roff  (IN2=H)\n");
-    uart_puts(" ? : show this menu\n> ");
+    uart_puts("\n==== TS12A44513 test (IC7 & IC8) ====\n");
+    uart_puts(" 1 : channel 1 (NO1) -> measure Roff\n");
+    uart_puts(" 2 : channel 2 (NC2) -> measure Ron\n");
+    uart_puts(" 0 : idle (IN1 = IN2 = HIGH)\n");
+    uart_puts(" ? : menu\n> ");
 }
 
 void main(void)
 {
     char c;
 
-    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;   /* stop watchdog */
+    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;
 
-    /* GPIO outputs, start with IN1 = L, IN2 = L */
-    P2->SEL0 &= ~(IN1_PIN | IN2_PIN);
-    P2->SEL1 &= ~(IN1_PIN | IN2_PIN);
-    P2->DIR  |=  (IN1_PIN | IN2_PIN);
-    P2->OUT  &= ~(IN1_PIN | IN2_PIN);
+    P2->SEL0 &= ~(IC7_IN1 | IC7_IN2);
+    P2->SEL1 &= ~(IC7_IN1 | IC7_IN2);
+    P2->DIR  |=  (IC7_IN1 | IC7_IN2);
+
+    P5->SEL0 &= ~(IC8_IN1 | IC8_IN2);
+    P5->SEL1 &= ~(IC8_IN1 | IC8_IN2);
+    P5->DIR  |=  (IC8_IN1 | IC8_IN2);
+
+    set_in1(1);          /* idle at boot */
+    set_in2(1);
 
     uart_init();
     menu();
@@ -91,24 +106,18 @@ void main(void)
 
         switch (c) {
         case '1':
-            P2->OUT |= IN1_PIN;                 /* IN1 = H : NO1-COM1 ON */
-            uart_puts("NO1 (pin1-pin2) is ON  -> MEASURE Ron  now\n> ");
+            set_in1(0);  set_in2(1);
+            uart_puts("CHANNEL 1: IN1 = LOW, NO1 (pin1-pin2) OFF -> MEASURE Roff\n> ");
             break;
         case '2':
-            P2->OUT &= ~IN1_PIN;                /* IN1 = L : NO1-COM1 OFF */
-            uart_puts("NO1 (pin1-pin2) is OFF -> MEASURE Roff now\n> ");
+            set_in2(0);  set_in1(1);
+            uart_puts("CHANNEL 2: IN2 = LOW, NC2 (pin3-pin4) ON  -> MEASURE Ron\n> ");
             break;
-        case '3':
-            P2->OUT &= ~IN2_PIN;                /* IN2 = L : NC2-COM2 ON */
-            uart_puts("NC2 (pin3-pin4) is ON  -> MEASURE Ron  now\n> ");
+        case '0':
+            set_in1(1);  set_in2(1);
+            uart_puts("IDLE: IN1 = IN2 = HIGH\n> ");
             break;
-        case '4':
-            P2->OUT |= IN2_PIN;                 /* IN2 = H : NC2-COM2 OFF */
-            uart_puts("NC2 (pin3-pin4) is OFF -> MEASURE Roff now\n> ");
-            break;
-        case '?':
-        case 'h':
-        case 'H':
+        case '?': case 'h': case 'H':
             menu();
             break;
         default:
