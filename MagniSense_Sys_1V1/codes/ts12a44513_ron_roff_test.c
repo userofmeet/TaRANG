@@ -1,128 +1,132 @@
+#include "msp.h"
+#include <stdint.h>
+
 /*
- * TS12A44513 test -- MSP432P401R (CCS) -- ONE code for channel 1 and channel 2
- * Both ICs (IC7 and IC8) are driven together with the same logic.
+ * MSP432P401R + 2x TS12A44513 (SW1 and SW2 groups)
  *
- *   Channel 1 = NO1 / COM1, controlled by IN1 -> measure Roff
- *   Channel 2 = NC2 / COM2, controlled by IN2 -> measure Ron
+ * SW1 IN1..IN4 : P2.3, P2.4, P2.6, P2.7
+ * SW2 IN1..IN4 : P5.0, P5.1, P5.2, P5.5
  *
- *   Type 1 : IN1 = LOW  (NO1 OFF)  -> MEASURE Roff on channel 1   (IN2 = HIGH)
- *   Type 2 : IN2 = LOW  (NC2 ON)   -> MEASURE Ron  on channel 2   (IN1 = HIGH)
- *   Type 0 : IN1 = IN2 = HIGH (idle, no test)
- *   Type ? : menu
+ * Switch types (from TS12A44513 pinout):
+ *   Switch 1 = NO  -> IN HIGH = ON
+ *   Switch 2 = NC  -> IN LOW  = ON
+ *   Switch 3 = NO  -> IN HIGH = ON
+ *   Switch 4 = NC  -> IN LOW  = ON
  *
- * Pins (edit defines if wiring differs):
- *   IC7 : P2.3 -> IN1, P2.4 -> IN2
- *   IC8 : P5.0 -> IN1, P5.1 -> IN2
- * Terminal: 9600 8-N-1 (backchannel UART), SMCLK = 3 MHz
+ * UART backchannel: P1.2 = RXD, P1.3 = TXD, 9600 baud, SMCLK = 3 MHz
+ *
+ * Terminal commands:
+ *   1..4 = switch n ON in both SW1 and SW2, all other switches OFF
+ *   0    = all switches OFF
  */
 
-#include "msp.h"
+static const uint8_t SW1_PINS[4] = { BIT3, BIT4, BIT6, BIT7 };   /* P2.3, P2.4, P2.6, P2.7 */
+static const uint8_t SW2_PINS[4] = { BIT0, BIT1, BIT2, BIT5 };   /* P5.0, P5.1, P5.2, P5.5 */
 
-#define IC7_IN1  BIT3   /* P2.3 */
-#define IC7_IN2  BIT4   /* P2.4 */
-#define IC8_IN1  BIT0   /* P5.0 */
-#define IC8_IN2  BIT1   /* P5.1 */
+#define SW1_MASK  (BIT3 | BIT4 | BIT6 | BIT7)
+#define SW2_MASK  (BIT0 | BIT1 | BIT2 | BIT5)
 
-static void uart_init(void)
+/* 1 = this switch is NC type (ON when IN is LOW) */
+static const uint8_t IS_NC[4] = { 0, 1, 0, 1 };
+
+void UART0_Init(void)
 {
-    EUSCI_A0->CTLW0 |= EUSCI_A_CTLW0_SWRST;
-    EUSCI_A0->CTLW0  = EUSCI_A_CTLW0_SWRST | EUSCI_A_CTLW0_SSEL__SMCLK;
-    EUSCI_A0->BRW    = 19;                       /* 3 MHz / 9600 */
-    EUSCI_A0->MCTLW  = (0xAA << EUSCI_A_MCTLW_BRS_OFS) |
-                       (8    << EUSCI_A_MCTLW_BRF_OFS) |
-                       EUSCI_A_MCTLW_OS16;
-    P1->SEL0 |= BIT2 | BIT3;
+    P1->SEL0 |= (BIT2 | BIT3);
     P1->SEL1 &= ~(BIT2 | BIT3);
-    EUSCI_A0->CTLW0 &= ~EUSCI_A_CTLW0_SWRST;
+
+    EUSCI_A0->CTLW0 = 0x0081;   /* reset, SMCLK */
+    EUSCI_A0->BRW = 312;        /* 3 MHz / 9600 */
+    EUSCI_A0->MCTLW = 0;
+    EUSCI_A0->CTLW0 &= ~BIT0;
 }
 
-static void uart_putc(char c)
+void UART0_SendChar(char c)
 {
-    while (!(EUSCI_A0->IFG & EUSCI_A_IFG_TXIFG));
-    EUSCI_A0->TXBUF = c;
+    while (!(EUSCI_A0->IFG & BIT1)) { }
+    EUSCI_A0->TXBUF = (uint8_t)c;
 }
 
-static void uart_puts(const char *s)
+void UART0_Print(const char *str)
 {
-    while (*s) {
-        if (*s == '\n') uart_putc('\r');
-        uart_putc(*s++);
+    while (*str != '\0') {
+        UART0_SendChar(*str++);
     }
 }
 
-static char uart_getc(void)
+/* row = 1..4: switch 'row' ON in both ICs, others OFF. row = 0: all OFF */
+void SetOutputs(uint8_t row)
 {
-    while (!(EUSCI_A0->IFG & EUSCI_A_IFG_RXIFG));
-    return (char)EUSCI_A0->RXBUF;
+    uint8_t i;
+
+    for (i = 0; i < 4; i++) {
+        uint8_t want_on = (row == (uint8_t)(i + 1));
+        /* NO switch: level = want_on.  NC switch: level = !want_on */
+        uint8_t level = IS_NC[i] ? !want_on : want_on;
+        /*IS_NC = [0,1,0,1]*/
+        if (level) {
+            P2->OUT |= SW1_PINS[i];
+            P5->OUT |= SW2_PINS[i];
+        } else {
+            P2->OUT &= ~SW1_PINS[i];
+            P5->OUT &= ~SW2_PINS[i];
+        }
+    }
 }
 
-/* level: 1 = HIGH, 0 = LOW ; applies to IC7 and IC8 together */
-static void set_in1(int level)
+void PrintState(uint8_t row)
 {
-    if (level) { P2->OUT |= IC7_IN1; P5->OUT |= IC8_IN1; }
-    else       { P2->OUT &= ~IC7_IN1; P5->OUT &= ~IC8_IN1; }
+    UART0_Print("\r\nSwitch ");
+    UART0_SendChar('0' + row);
+    UART0_Print(" ON in SW1 and SW2, all other switches OFF\r\n");
 }
 
-static void set_in2(int level)
+int main(void)
 {
-    if (level) { P2->OUT |= IC7_IN2; P5->OUT |= IC8_IN2; }
-    else       { P2->OUT &= ~IC7_IN2; P5->OUT &= ~IC8_IN2; }
-}
+    char command;
 
-static void menu(void)
-{
-    uart_puts("\n==== TS12A44513 test (IC7 & IC8) ====\n");
-    uart_puts(" 1 : channel 1 (NO1) -> measure Roff\n");
-    uart_puts(" 2 : channel 2 (NC2) -> measure Ron\n");
-    uart_puts(" 0 : idle (IN1 = IN2 = HIGH)\n");
-    uart_puts(" ? : menu\n> ");
-}
+    WDT_A->CTL = 0x5A80;
 
-void main(void)
-{
-    char c;
+    P2->SEL0 &= ~SW1_MASK;
+    P2->SEL1 &= ~SW1_MASK;
+    P5->SEL0 &= ~SW2_MASK;
+    P5->SEL1 &= ~SW2_MASK;
 
-    WDT_A->CTL = WDT_A_CTL_PW | WDT_A_CTL_HOLD;
+    SetOutputs(0);              /* preload OFF levels before enabling outputs */
+    P2->DIR |= SW1_MASK;
+    P5->DIR |= SW2_MASK;
 
-    P2->SEL0 &= ~(IC7_IN1 | IC7_IN2);
-    P2->SEL1 &= ~(IC7_IN1 | IC7_IN2);
-    P2->DIR  |=  (IC7_IN1 | IC7_IN2);
+    UART0_Init();
 
-    P5->SEL0 &= ~(IC8_IN1 | IC8_IN2);
-    P5->SEL1 &= ~(IC8_IN1 | IC8_IN2);
-    P5->DIR  |=  (IC8_IN1 | IC8_IN2);
-
-    set_in1(1);          /* idle at boot */
-    set_in2(1);
-
-    uart_init();
-    menu();
+    UART0_Print("\r\nMSP432 Switch Controller\r\n");
+    UART0_Print("1-4: turn ON switch n in SW1 and SW2\r\n");
+    UART0_Print("0  : all switches OFF\r\n");
 
     while (1) {
-        c = uart_getc();
-        if (c == '\r' || c == '\n' || c == ' ') continue;
-        uart_putc(c);
-        uart_puts("\n");
+        if (EUSCI_A0->IFG & BIT0) {
+            command = (char)EUSCI_A0->RXBUF;
 
-        switch (c) {
-        case '1':
-            set_in1(0);  set_in2(1);
-            uart_puts("CHANNEL 1: IN1 = LOW, NO1 (pin1-pin2) OFF -> MEASURE Roff\n> ");
-            break;
-        case '2':
-            set_in2(0);  set_in1(1);
-            uart_puts("CHANNEL 2: IN2 = LOW, NC2 (pin3-pin4) ON  -> MEASURE Ron\n> ");
-            break;
-        case '0':
-            set_in1(1);  set_in2(1);
-            uart_puts("IDLE: IN1 = IN2 = HIGH\n> ");
-            break;
-        case '?': case 'h': case 'H':
-            menu();
-            break;
-        default:
-            uart_puts("Invalid input. Type ? for menu.\n> ");
-            break;
+            switch (command) {
+                case '1':
+                case '2':
+                case '3':
+                case '4':
+                    SetOutputs(command - '0');
+                    PrintState(command - '0');
+                    break;
+
+                case '0':
+                    SetOutputs(0);
+                    UART0_Print("\r\nALL SWITCHES OFF\r\n");
+                    break;
+
+                case '\r':
+                case '\n':
+                    break;
+
+                default:
+                    UART0_Print("\r\nInvalid command: use 0-4\r\n");
+                    break;
+            }
         }
     }
 }
